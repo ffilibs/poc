@@ -33,7 +33,7 @@ import { dlopen, ptr, CString } from 'bun:ffi';
 import path from 'path';
 
 // Load the library
-const lib = dlopen(path.join(process.cwd(), 'node_modules/@ffilibs/libgit2-beta/lib/libgit2.a'), {
+const lib = dlopen(path.join(process.cwd(), 'node_modules/@ffilibs/libgit2-beta/prebuilds/linux/arm/lib/libgit2.a'), {
   git_libgit2_init: {
     args: [],
     returns: 'int',
