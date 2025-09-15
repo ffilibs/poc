@@ -58,7 +58,7 @@ lib.symbols.git_libgit2_shutdown();
 
 | Library | Version | Description | Package |
 |---------|---------|-------------|---------|
-| **libgit2** | 1.9.1 | Git implementation library | `@ffilibs/libgit2` |
+| **libgit2** | 1.9.1 | Git implementation library | `@ffilibs/libgit2-beta` |
 
 ## 🏗️ Supported Platforms
 
