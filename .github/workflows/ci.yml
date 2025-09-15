@@ -1,0 +1,227 @@
+name: Build and Package
+
+on:
+  # push:
+  #   branches: [ main, master ]
+  # pull_request:
+  #   branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      package:
+        description: 'Package to build'
+        required: true
+        default: 'libgit2'
+        type: choice
+        options:
+          - libgit2
+          - libssh2
+      version:
+        description: 'Version to build'
+        required: true
+        default: '1.9.1'
+        type: string
+      package_version:
+        description: 'Version of the npm package'
+        required: true
+        default: '2'
+        type: string
+
+
+jobs:
+  build:
+    name: Build ${{ inputs.package }} for ${{ matrix.os }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux builds
+          - os: ubuntu-latest
+            arch: x64
+            platform: linux
+            runner_arch: intel
+          - os: ubuntu-latest
+            arch: arm64
+            platform: linux
+            runner_arch: arm
+            # Use ARM64 runner when available
+            runs-on: ubuntu-latest
+          # macOS builds
+          - os: macos-latest
+            arch: x64
+            platform: macos
+            runner_arch: intel
+          - os: macos-14
+            arch: arm64
+            platform: macos
+            runner_arch: arm
+          # Windows builds
+          # - os: windows-latest
+          #   arch: x64
+          #   platform: windows
+          #   runner_arch: intel
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up build environment (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config libssl-dev libssh2-1-dev
+
+      - name: Set up build environment (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          # Handle cmake conflict by uninstalling and reinstalling if needed
+          if brew list cmake &>/dev/null; then
+            brew uninstall cmake
+          fi
+          brew install cmake pkg-config openssl libssh2
+          # Create a standalone nproc script for macOS compatibility
+          sudo mkdir -p /usr/local/bin
+          echo '#!/bin/bash' | sudo tee /usr/local/bin/nproc > /dev/null
+          echo 'sysctl -n hw.ncpu' | sudo tee -a /usr/local/bin/nproc > /dev/null
+          sudo chmod +x /usr/local/bin/nproc
+          # Verify nproc works
+          nproc
+
+      - name: Set up build environment (Windows)
+        if: matrix.platform == 'windows'
+        run: |
+          # Install dependencies using chocolatey (cmake should already be available)
+          # Most dependencies are already available on windows-latest
+          echo "Windows build environment ready"
+
+      - name: Build ${{ inputs.package }} (Unix)
+        if: matrix.platform != 'windows'
+        working-directory: packages/${{ inputs.package }}
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          ./build.sh
+
+      - name: Build ${{ inputs.package }} (Windows)
+        if: matrix.platform == 'windows'
+        working-directory: packages/${{ inputs.package }}
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          powershell -ExecutionPolicy Bypass -File build.ps1 -Version "$env:VERSION"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.package }}-${{ matrix.platform }}-${{ matrix.runner_arch }}
+          path: packages/${{ inputs.package }}/release.tar.gz
+          retention-days: 2
+
+  package:
+    name: Package all builds
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: packages/${{ inputs.package }}/artifacts
+
+      - name: Run package script
+        working-directory: packages/${{ inputs.package }}
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          ../../scripts/package.sh
+
+      - name: Upload final package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.package }}-final-release
+          path: packages/${{ inputs.package }}/final-release.tar.gz
+          retention-days: 2
+
+  publish:
+    name: Generate npm package
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download final release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.package }}-final-release
+          path: packages/${{ inputs.package }}/
+
+      - name: Run publish script
+        working-directory: packages/${{ inputs.package }}
+        env:
+          VERSION: ${{ inputs.version }}
+          NAME: ${{ inputs.package }}
+          PACKAGE_VERSION: ${{ inputs.package_version }}
+        run: |
+          ../../scripts/publish.sh
+
+      - name: Upload npm package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.package }}-npm-package
+          path: packages/${{ inputs.package }}/npm-package.tar.gz
+          retention-days: 7
+
+  publish-npm:
+    name: Publish to npm
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download npm package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.package }}-npm-package
+          path: packages/${{ inputs.package }}/
+
+      - name: Extract and publish npm package
+        working-directory: packages/${{ inputs.package }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # List files to debug
+          ls -la
+          
+          # Extract the npm package
+          tar -xzf npm-package.tar.gz
+          
+          # List extracted contents
+          ls -la
+          
+          # Find the package.json file and publish from its directory
+          if [ -f package.json ]; then
+            npm publish --access public
+          elif [ -d npm-package ]; then
+            cd npm-package
+            npm publish --access public
+          else
+            # Find any directory with package.json
+            PKG_DIR=$(find . -name "package.json" -type f | head -1 | xargs dirname)
+            if [ -n "$PKG_DIR" ]; then
+              cd "$PKG_DIR"
+              npm publish --access public
+            else
+              echo "Error: Could not find package.json file"
+              exit 1
+            fi
+          fi
